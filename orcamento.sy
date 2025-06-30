@@ -1,0 +1,709 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import sqlite3
+import os
+from datetime import datetime
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.platypus import Table, TableStyle
+
+class SistemaOrcamentos:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Sistema de Orçamentos com Margem")
+        self.root.geometry("1000x700")
+        
+        # Configurações
+        self.DB_NAME = "orcamentos.db"
+        self.ORCAMENTOS_DIR = "Orcamentos"
+        
+        # Inicializar banco de dados
+        self.inicializar_banco_dados()
+        
+        # Criar interface
+        self.criar_interface()
+    def inicializar_banco_dados(self):
+        self.conn = sqlite3.connect(self.DB_NAME)
+        self.cursor = self.conn.cursor()
+        
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS orcamentos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cliente TEXT NOT NULL,
+            data TEXT NOT NULL,
+            total REAL NOT NULL,
+            margem_total REAL NOT NULL,
+            arquivo TEXT NOT NULL
+        )
+        ''')
+        
+        self.cursor.execute('''
+        CREATE TABLE IF NOT EXISTS itens_orcamento (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orcamento_id INTEGER NOT NULL,
+            produto TEXT NOT NULL,
+            quantidade REAL NOT NULL,
+            preco_venda REAL NOT NULL,
+            preco_custo REAL NOT NULL,
+            margem_bruta REAL NOT NULL,
+            margem_percentual REAL NOT NULL,
+            FOREIGN KEY (orcamento_id) REFERENCES orcamentos (id)
+        )
+        ''')
+        
+        self.conn.commit()
+        os.makedirs(self.ORCAMENTOS_DIR, exist_ok=True)
+    def criar_interface(self):
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill="both", expand=True)
+        self.criar_aba_busca()
+
+    def criar_aba_busca(self):
+        self.aba_busca = ttk.Frame(self.notebook)
+        self.notebook.add(self.aba_busca, text="Buscar Orçamentos")
+        
+        # Frame de filtros
+        frame_filtros = ttk.LabelFrame(self.aba_busca, text="Filtrar", padding=10)
+        frame_filtros.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(frame_filtros, text="Cliente:").grid(row=0, column=0, sticky="w")
+        self.filtro_cliente = ttk.Entry(frame_filtros)
+        self.filtro_cliente.grid(row=0, column=1, padx=5, sticky="we")
+        
+        btn_buscar = ttk.Button(frame_filtros, text="Buscar", command=self.buscar_orcamentos)
+        btn_buscar.grid(row=0, column=2, padx=5)
+        
+        btn_novo = ttk.Button(frame_filtros, text="Novo Orçamento", command=self.novo_orcamento)
+        btn_novo.grid(row=0, column=3, padx=5)
+        
+        # Treeview para resultados
+        frame_resultados = ttk.Frame(self.aba_busca)
+        frame_resultados.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        self.tree_orcamentos = ttk.Treeview(frame_resultados, 
+                                         columns=("id", "cliente", "data", "total", "margem"), 
+                                         show="headings")
+        self.tree_orcamentos.heading("id", text="ID")
+        self.tree_orcamentos.heading("cliente", text="Cliente")
+        self.tree_orcamentos.heading("data", text="Data")
+        self.tree_orcamentos.heading("total", text="Total Venda")
+        self.tree_orcamentos.heading("margem", text="Margem Total")
+        
+        scrollbar = ttk.Scrollbar(frame_resultados, orient="vertical", command=self.tree_orcamentos.yview)
+        self.tree_orcamentos.configure(yscrollcommand=scrollbar.set)
+        
+        self.tree_orcamentos.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Adicionar bind para duplo clique
+        self.tree_orcamentos.bind("<Double-1>", self.editar_orcamento_click)
+        
+        # Botões de ação
+        frame_botoes = ttk.Frame(self.aba_busca)
+        frame_botoes.pack(fill="x", padx=10, pady=5)
+        
+        btn_editar = ttk.Button(frame_botoes, text="Editar Orçamento", command=self.editar_orcamento_selecionado)
+        btn_editar.pack(side="left", padx=5)
+        
+        btn_excluir = ttk.Button(frame_botoes, text="Excluir Orçamento", command=self.excluir_orcamento)
+        btn_excluir.pack(side="left", padx=5)
+        
+        self.buscar_orcamentos()
+    def buscar_orcamentos(self):
+        for item in self.tree_orcamentos.get_children():
+            self.tree_orcamentos.delete(item)
+            
+        filtro_cliente = self.filtro_cliente.get().strip()
+        
+        query = "SELECT id, cliente, data, total, margem_total FROM orcamentos"
+        params = []
+        
+        if filtro_cliente:
+            query += " WHERE cliente LIKE ?"
+            params.append(f"%{filtro_cliente}%")
+            
+        query += " ORDER BY id DESC"
+        
+        self.cursor.execute(query, params)
+        orcamentos = self.cursor.fetchall()
+        
+        for orcamento in orcamentos:
+            id_orc, cliente, data, total, margem = orcamento
+            try:
+                data_obj = datetime.strptime(data, "%Y-%m-%d_%H%M")
+                data_formatada = data_obj.strftime("%d/%m/%Y %H:%M")
+            except:
+                data_formatada = data
+                
+            self.tree_orcamentos.insert("", "end", values=(
+                id_orc,
+                cliente,
+                data_formatada,
+                f"R$ {total:.2f}",
+                f"R$ {margem:.2f}"
+            ))
+
+    def novo_orcamento(self):
+        self.criar_aba_edicao()
+
+    def editar_orcamento_selecionado(self):
+        selecionado = self.tree_orcamentos.selection()
+        if not selecionado:
+            messagebox.showwarning("Aviso", "Selecione um orçamento para editar")
+            return
+            
+        orcamento_id = self.tree_orcamentos.item(selecionado[0], "values")[0]
+        self.editar_orcamento(orcamento_id)
+
+    def editar_orcamento_click(self, event):
+        selecionado = self.tree_orcamentos.selection()
+        if selecionado:
+            orcamento_id = self.tree_orcamentos.item(selecionado[0], "values")[0]
+            self.editar_orcamento(orcamento_id)
+
+    def editar_orcamento(self, orcamento_id):
+        self.criar_aba_edicao(orcamento_id)
+    def criar_aba_edicao(self, orcamento_id=None):
+        # Remover aba existente se houver
+        for tab in self.notebook.tabs():
+            if self.notebook.tab(tab, "text") == "Editar Orçamento":
+                self.notebook.forget(tab)
+        
+        # Criar nova aba
+        self.aba_edicao = ttk.Frame(self.notebook)
+        self.notebook.add(self.aba_edicao, text="Editar Orçamento")
+        self.notebook.select(self.aba_edicao)
+        
+        # Variáveis
+        self.orcamento_id_edicao = orcamento_id
+        self.produtos_edicao = []
+        
+        # Frame do cliente
+        frame_cliente = ttk.LabelFrame(self.aba_edicao, text="Cliente", padding=10)
+        frame_cliente.pack(fill="x", padx=10, pady=5)
+        
+        ttk.Label(frame_cliente, text="Nome:").grid(row=0, column=0, sticky="w")
+        self.entry_cliente = ttk.Entry(frame_cliente)
+        self.entry_cliente.grid(row=0, column=1, padx=5, sticky="we")
+        
+        # Frame de produtos
+        frame_produtos = ttk.LabelFrame(self.aba_edicao, text="Produtos", padding=10)
+        frame_produtos.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        self.tree_produtos = ttk.Treeview(frame_produtos, 
+                                       columns=("produto", "quantidade", "preco", "custo", "margem", "total"), 
+                                       show="headings")
+        self.tree_produtos.heading("produto", text="Produto")
+        self.tree_produtos.heading("quantidade", text="Qtd")
+        self.tree_produtos.heading("preco", text="Preço Venda")
+        self.tree_produtos.heading("custo", text="Preço Custo")
+        self.tree_produtos.heading("margem", text="Margem %")
+        self.tree_produtos.heading("total", text="Total")
+        
+        scrollbar = ttk.Scrollbar(frame_produtos, orient="vertical", command=self.tree_produtos.yview)
+        self.tree_produtos.configure(yscrollcommand=scrollbar.set)
+        
+        self.tree_produtos.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
+        # Frame para adicionar produtos
+        frame_add = ttk.LabelFrame(self.aba_edicao, text="Adicionar Produto", padding=10)
+        frame_add.pack(fill="x", padx=10, pady=5)
+        
+        # Linha 1 - Dados básicos
+        ttk.Label(frame_add, text="Produto:").grid(row=0, column=0, sticky="w")
+        self.entry_produto = ttk.Entry(frame_add)
+        self.entry_produto.grid(row=0, column=1, padx=5, sticky="we")
+        
+        ttk.Label(frame_add, text="Qtd:").grid(row=0, column=2, sticky="w")
+        self.entry_quantidade = ttk.Entry(frame_add, width=8)
+        self.entry_quantidade.grid(row=0, column=3, padx=5)
+        
+        # Linha 2 - Cálculo de margem
+        ttk.Label(frame_add, text="Preço Custo:").grid(row=1, column=0, sticky="w")
+        self.entry_custo = ttk.Entry(frame_add, width=10)
+        self.entry_custo.grid(row=1, column=1, padx=5)
+        
+        ttk.Label(frame_add, text="Margem %:").grid(row=1, column=2, sticky="w")
+        self.entry_margem = ttk.Entry(frame_add, width=8)
+        self.entry_margem.grid(row=1, column=3, padx=5)
+        
+        btn_calcular = ttk.Button(frame_add, text="Calcular Preço", command=self.calcular_preco_venda)
+        btn_calcular.grid(row=1, column=4, padx=5)
+        
+        ttk.Label(frame_add, text="Preço Venda:").grid(row=1, column=5, sticky="w")
+        self.entry_preco = ttk.Entry(frame_add, width=10)
+        self.entry_preco.grid(row=1, column=6, padx=5)
+        
+        btn_add = ttk.Button(frame_add, text="Adicionar", command=self.adicionar_produto)
+        btn_add.grid(row=1, column=7, padx=5)
+
+        # Frame margem universal
+        frame_margem_universal = ttk.Frame(self.aba_edicao)
+        frame_margem_universal.pack(fill="x", padx=10, pady=10)
+
+        label_margem_universal = ttk.Label(frame_margem_universal, text="Margem % para todos os produtos:")
+        label_margem_universal.pack(side="left")
+
+        self.entry_margem_universal = ttk.Entry(frame_margem_universal, width=10)
+        self.entry_margem_universal.pack(side="left", padx=5)
+
+        btn_aplicar_margem = ttk.Button(frame_margem_universal, text="Aplicar a Todos", command=self.aplicar_margem_universal)
+        btn_aplicar_margem.pack(side="left", padx=10)
+
+        # Frame de botões para produtos
+        frame_botoes_produto = ttk.Frame(self.aba_edicao)
+        frame_botoes_produto.pack(fill="x", padx=10, pady=5)
+        
+        btn_remover = ttk.Button(frame_botoes_produto, text="Remover Produto", command=self.remover_produto)
+        btn_remover.pack(side="left", padx=5)
+        
+        # Frame de total e botões principais
+        frame_total = ttk.Frame(self.aba_edicao)
+        frame_total.pack(fill="x", padx=10, pady=10)
+        
+        self.label_total = ttk.Label(frame_total, text="Total Venda: R$ 0.00", font=("Arial", 10, "bold"))
+        self.label_total.pack(side="left")
+        
+        self.label_margem = ttk.Label(frame_total, text="Margem Total: R$ 0.00", font=("Arial", 10, "bold"))
+        self.label_margem.pack(side="left", padx=20)
+        
+        btn_salvar = ttk.Button(frame_total, text="Salvar", command=self.salvar_orcamento)
+        btn_salvar.pack(side="right", padx=5)
+        
+        btn_cancelar = ttk.Button(frame_total, text="Cancelar", command=lambda: self.notebook.select(self.aba_busca))
+        btn_cancelar.pack(side="right", padx=5)
+
+        # Se estiver editando, carregar os dados
+        if orcamento_id:
+            self.carregar_dados_orcamento(orcamento_id)
+    def carregar_dados_orcamento(self, orcamento_id):
+        # Buscar dados do orçamento
+        self.cursor.execute(
+            "SELECT cliente FROM orcamentos WHERE id = ?",
+            (orcamento_id,)
+        )
+        orcamento = self.cursor.fetchone()
+        
+        if not orcamento:
+            messagebox.showerror("Erro", "Orçamento não encontrado")
+            return
+            
+        # Preencher dados do cliente
+        self.entry_cliente.delete(0, "end")
+        self.entry_cliente.insert(0, orcamento[0])
+        
+        # Buscar itens do orçamento
+        self.cursor.execute(
+            "SELECT produto, quantidade, preco_venda, preco_custo FROM itens_orcamento WHERE orcamento_id = ?",
+            (orcamento_id,)
+        )
+        itens = self.cursor.fetchall()
+        
+        # Limpar treeview e lista de produtos
+        for item in self.tree_produtos.get_children():
+            self.tree_produtos.delete(item)
+            
+        self.produtos_edicao = []
+        
+        # Adicionar cada item
+        for produto, quantidade, preco_venda, preco_custo in itens:
+            margem_bruta = preco_venda - preco_custo
+            margem_percentual = (margem_bruta / preco_custo) * 100 if preco_custo != 0 else 0
+            total = quantidade * preco_venda
+            
+            self.produtos_edicao.append({
+                "produto": produto,
+                "quantidade": quantidade,
+                "preco": preco_venda,
+                "custo": preco_custo,
+                "margem_bruta": margem_bruta,
+                "margem_percentual": margem_percentual,
+                "total": total
+            })
+            
+            self.tree_produtos.insert("", "end", values=(
+                produto,
+                f"{quantidade:.2f}",
+                f"R$ {preco_venda:.2f}",
+                f"R$ {preco_custo:.2f}",
+                f"{margem_percentual:.1f}%",
+                f"R$ {total:.2f}"
+            ))
+        
+        # Atualizar totais
+        self.atualizar_totais()
+
+    def atualizar_totais(self):
+        total_geral = sum(p["total"] for p in self.produtos_edicao)
+        margem_total = sum(p["margem_bruta"] * p["quantidade"] for p in self.produtos_edicao)
+        
+        self.label_total.config(text=f"Total Venda: R$ {total_geral:.2f}")
+        self.label_margem.config(text=f"Margem Total: R$ {margem_total:.2f}")
+    def calcular_preco_venda(self):
+        try:
+            custo = float(self.entry_custo.get())
+            margem = float(self.entry_margem.get())
+            
+            if custo <= 0 or margem < 0:
+                messagebox.showwarning("Aviso", "Valores devem ser positivos")
+                return
+                
+            preco_venda = custo * (1 + margem/100)
+            self.entry_preco.delete(0, "end")
+            self.entry_preco.insert(0, f"{preco_venda:.2f}")
+            
+        except ValueError:
+            messagebox.showerror("Erro", "Valores inválidos. Use números para custo e margem.")
+
+    def adicionar_produto(self):
+        try:
+            produto = self.entry_produto.get().strip()
+            quantidade = float(self.entry_quantidade.get())
+            preco = float(self.entry_preco.get())
+            custo = float(self.entry_custo.get())
+            
+            if not produto:
+                messagebox.showwarning("Aviso", "Informe o nome do produto")
+                return
+                
+            margem_bruta = preco - custo
+            margem_percentual = (margem_bruta / custo) * 100 if custo != 0 else 0
+            total = quantidade * preco
+            
+            self.produtos_edicao.append({
+                "produto": produto,
+                "quantidade": quantidade,
+                "preco": preco,
+                "custo": custo,
+                "margem_bruta": margem_bruta,
+                "margem_percentual": margem_percentual,
+                "total": total
+            })
+            
+            self.tree_produtos.insert("", "end", values=(
+                produto, 
+                f"{quantidade:.2f}", 
+                f"R$ {preco:.2f}",
+                f"R$ {custo:.2f}",
+                f"{margem_percentual:.1f}%",
+                f"R$ {total:.2f}"
+            ))
+            
+            # Atualizar totais
+            self.atualizar_totais()
+            
+            # Limpar campos
+            self.entry_produto.delete(0, "end")
+            self.entry_quantidade.delete(0, "end")
+            self.entry_custo.delete(0, "end")
+            self.entry_margem.delete(0, "end")
+            self.entry_preco.delete(0, "end")
+            self.entry_produto.focus()
+            
+        except ValueError:
+            messagebox.showerror("Erro", "Valores inválidos. Use números para quantidade e preços.")
+
+    def remover_produto(self):
+        selecionados = self.tree_produtos.selection()
+        if not selecionados:
+            messagebox.showwarning("Aviso", "Selecione um produto para remover")
+            return
+            
+        for item in selecionados:
+            produto = self.tree_produtos.item(item, "values")[0]
+            # Remover da lista
+            self.produtos_edicao = [p for p in self.produtos_edicao if p["produto"] != produto]
+            # Remover da treeview
+            self.tree_produtos.delete(item)
+        
+        # Atualizar totais
+        self.atualizar_totais()
+    def salvar_orcamento(self):
+        cliente = self.entry_cliente.get().strip()
+        if not cliente:
+            messagebox.showwarning("Aviso", "Informe o nome do cliente")
+            return
+            
+        if not self.produtos_edicao:
+            messagebox.showwarning("Aviso", "Adicione pelo menos um produto")
+            return
+        
+        total_geral = sum(p["total"] for p in self.produtos_edicao)
+        margem_total = sum(p["margem_bruta"] * p["quantidade"] for p in self.produtos_edicao)
+        data = datetime.now().strftime("%Y-%m-%d_%H%M")
+        
+        try:
+            # Se for edição, usar o mesmo nome de arquivo, senão criar novo
+            if self.orcamento_id_edicao:
+                self.cursor.execute(
+                    "SELECT arquivo FROM orcamentos WHERE id = ?",
+                    (self.orcamento_id_edicao,)
+                )
+                nome_arquivo = self.cursor.fetchone()[0]
+            else:
+                nome_arquivo = f"{self.ORCAMENTOS_DIR}/Orc_{data}_{cliente[:20]}.pdf"
+            
+            # Gerar PDF
+            if not self.gerar_pdf(nome_arquivo, cliente, total_geral, margem_total):
+                messagebox.showerror("Erro", "Falha ao gerar PDF")
+                return
+            
+            # Salvar no banco de dados
+            if self.orcamento_id_edicao:
+                # Atualizar existente
+                self.cursor.execute(
+                    "UPDATE orcamentos SET cliente=?, data=?, total=?, margem_total=?, arquivo=? WHERE id=?",
+                    (cliente, data, total_geral, margem_total, nome_arquivo, self.orcamento_id_edicao)
+                )
+                # Remover itens antigos
+                self.cursor.execute(
+                    "DELETE FROM itens_orcamento WHERE orcamento_id=?",
+                    (self.orcamento_id_edicao,)
+                )
+                orcamento_id = self.orcamento_id_edicao
+            else:
+                # Novo orçamento
+                self.cursor.execute(
+                    "INSERT INTO orcamentos (cliente, data, total, margem_total, arquivo) VALUES (?, ?, ?, ?, ?)",
+                    (cliente, data, total_geral, margem_total, nome_arquivo)
+                )
+                orcamento_id = self.cursor.lastrowid
+            
+            # Salvar itens
+            for produto in self.produtos_edicao:
+                self.cursor.execute(
+                    '''INSERT INTO itens_orcamento 
+                    (orcamento_id, produto, quantidade, preco_venda, preco_custo, margem_bruta, margem_percentual) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?)''',
+                    (orcamento_id, produto["produto"], produto["quantidade"], produto["preco"], 
+                     produto["custo"], produto["margem_bruta"], produto["margem_percentual"])
+                )
+            
+            self.conn.commit()
+            messagebox.showinfo("Sucesso", "Orçamento salvo com sucesso!")
+            self.notebook.select(self.aba_busca)
+            self.buscar_orcamentos()
+            
+        except Exception as e:
+            self.conn.rollback()
+            messagebox.showerror("Erro", f"Falha ao salvar no banco de dados: {e}")
+
+    def gerar_pdf(self, nome_arquivo, cliente, total_geral, margem_total):
+        try:
+            # Garantir que o diretório existe
+            os.makedirs(os.path.dirname(nome_arquivo) or ".", exist_ok=True)
+            
+            c = canvas.Canvas(nome_arquivo, pagesize=A4)
+            width, height = A4
+            
+            # Configurações de estilo
+            c.setTitle(f"Orçamento - {cliente}")
+            c.setAuthor("Sua Empresa")
+            
+            # ---- CABEÇALHO ---- #
+            try:
+                logo_path = "logo.png"
+                if os.path.exists(logo_path):
+                    c.drawImage(logo_path, 50, height-100, width=100, height=50, preserveAspectRatio=True)
+            except:
+                pass
+
+            # Informações da empresa
+            c.setFont("Helvetica-Bold", 14)
+            c.drawString(170, height-60, "SUA EMPRESA LTDA")
+            c.setFont("Helvetica", 10)
+            c.drawString(170, height-80, "CNPJ: 00.000.000/0001-00")
+            c.drawString(170, height-95, "Endereço: Rua Exemplo, 123 - Cidade/UF")
+            c.drawString(170, height-110, "Telefone: (00) 0000-0000 | Email: contato@empresa.com")
+            
+            # Linha divisória
+            c.line(50, height-130, width-50, height-130)
+            
+            # ---- TÍTULO ---- #
+            c.setFont("Helvetica-Bold", 18)
+            c.drawCentredString(width/2, height-160, "ORÇAMENTO")
+            
+            # ---- INFORMAÇÕES DO CLIENTE ---- #
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(50, height-190, "Cliente:")
+            c.setFont("Helvetica", 12)
+            c.drawString(120, height-190, cliente)
+            
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(width-200, height-190, "Data:")
+            c.setFont("Helvetica", 12)
+            c.drawString(width-150, height-190, datetime.now().strftime('%d/%m/%Y'))
+            
+            if self.orcamento_id_edicao:
+                c.setFont("Helvetica-Bold", 12)
+                c.drawString(width-200, height-210, "Nº Orçamento:")
+                c.setFont("Helvetica", 12)
+                c.drawString(width-100, height-210, f"{self.orcamento_id_edicao}")
+            
+            # ---- TABELA DE PRODUTOS ---- #
+            c.setFont("Helvetica-Bold", 12)
+            c.drawString(50, height-240, "Itens Orçados:")
+            
+            # Dados da tabela (sem preço de custo ou margem)
+            data = [
+                ["Item", "Descrição", "Quantidade", "Preço Unitário", "Total"],
+            ]
+            
+            for idx, produto in enumerate(self.produtos_edicao, start=1):
+                data.append([
+                    str(idx),
+                    produto["produto"],
+                    f"{produto['quantidade']:.2f}",
+                    f"R$ {produto['preco']:.2f}",
+                    f"R$ {produto['total']:.2f}"
+                ])
+            
+            # Adiciona totais (sem mostrar margem)
+            data.append(["", "", "", "Subtotal:", f"R$ {total_geral:.2f}"])
+            if total_geral > 0:
+                desconto = 0  # Você pode adicionar desconto se quiser
+                data.append(["", "", "", "Desconto:", f"R$ {desconto:.2f}"])
+            data.append(["", "", "", "TOTAL:", f"R$ {total_geral:.2f}"])
+            
+            # Cria e estiliza a tabela
+            table = Table(data, colWidths=[40, 220, 70, 90, 80])
+            table.setStyle(TableStyle([
+                ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#003366")),
+                ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+                ("ALIGN", (0,0), (-1,-1), "CENTER"),
+                ("ALIGN", (1,0), (1,-1), "LEFT"),
+                ("ALIGN", (-2,0), (-1,-1), "RIGHT"),
+                ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+                ("FONTSIZE", (0,0), (-1,0), 10),
+                ("BOTTOMPADDING", (0,0), (-1,0), 12),
+                ("BACKGROUND", (0,1), (-1,-4), colors.HexColor("#f8f8f8")),
+                ("GRID", (0,0), (-1,-4), 0.5, colors.lightgrey),
+                ("BOX", (0,-3), (-1,-1), 1, colors.black),
+                ("FONTNAME", (0,-3), (-1,-1), "Helvetica-Bold"),
+                ("BACKGROUND", (0,-1), (-1,-1), colors.HexColor("#e6f2ff")),
+                ("FONTSIZE", (0,-3), (-1,-1), 12),
+            ]))
+            
+            table.wrapOn(c, width-100, height)
+            table.drawOn(c, 50, height-490)
+            
+            # ---- OBSERVAÇÕES ---- #
+            c.setFont("Helvetica", 10)
+            c.drawString(50, 150, "Observações:")
+            c.drawString(50, 135, "- Validade do orçamento: 7 dias")
+            c.drawString(50, 120, "- Forma de pagamento: A combinar")
+            c.drawString(50, 105, "- Condições especiais sob consulta")
+            
+            # ---- RODAPÉ ---- #
+            c.setFont("Helvetica", 8)
+            c.drawCentredString(width/2, 50, "Agradecemos pela preferência!")
+            c.drawCentredString(width/2, 35, "Sua Empresa LTDA - CNPJ: 00.000.000/0001-00")
+            
+            c.line(50, 30, width-50, 30)
+            
+            c.save()
+            return True
+            
+        except Exception as e:
+            print(f"Erro ao gerar PDF: {e}")
+            return False
+    def aplicar_margem_universal(self):
+        try:
+            margem = float(self.entry_margem_universal.get())
+            if margem < 0:
+                messagebox.showwarning("Aviso", "A margem deve ser um valor positivo")
+                return
+
+            # Aplicar a todos os produtos
+            for produto in self.produtos_edicao:
+                custo = produto["custo"]
+                preco_venda = custo * (1 + margem / 100)
+                produto["preco"] = preco_venda
+                produto["margem_bruta"] = preco_venda - custo
+                produto["margem_percentual"] = margem
+                produto["total"] = preco_venda * produto["quantidade"]
+
+            # Atualizar exibição completa da lista
+            for item in self.tree_produtos.get_children():
+                self.tree_produtos.delete(item)
+
+            for produto in self.produtos_edicao:
+                self.tree_produtos.insert("", "end", values=(
+                    produto["produto"],
+                    f"{produto['quantidade']:.2f}",
+                    f"R$ {produto['preco']:.2f}",
+                    f"R$ {produto['custo']:.2f}",
+                    f"{produto['margem_percentual']:.1f}%",
+                    f"R$ {produto['total']:.2f}"
+                ))
+
+            self.atualizar_totais()
+
+        except ValueError:
+            messagebox.showerror("Erro", "Valor de margem inválido. Digite um número.")
+
+    def excluir_orcamento(self):
+        selecionado = self.tree_orcamentos.selection()
+        if not selecionado:
+            messagebox.showwarning("Aviso", "Selecione um orçamento para excluir")
+            return
+            
+        orcamento_id = self.tree_orcamentos.item(selecionado[0], "values")[0]
+        cliente = self.tree_orcamentos.item(selecionado[0], "values")[1]
+        
+        confirmacao = messagebox.askyesno(
+            "Confirmar Exclusão",
+            f"Tem certeza que deseja excluir o orçamento ID {orcamento_id} do cliente {cliente}?"
+        )
+        
+        if not confirmacao:
+            return
+        
+        try:
+            # Buscar arquivo para excluir
+            self.cursor.execute(
+                "SELECT arquivo FROM orcamentos WHERE id = ?",
+                (orcamento_id,)
+            )
+            arquivo = self.cursor.fetchone()[0]
+            
+            # Excluir do banco de dados
+            self.cursor.execute(
+                "DELETE FROM itens_orcamento WHERE orcamento_id = ?",
+                (orcamento_id,)
+            )
+            self.cursor.execute(
+                "DELETE FROM orcamentos WHERE id = ?",
+                (orcamento_id,)
+            )
+            self.conn.commit()
+            
+            # Tentar excluir o arquivo
+            try:
+                if arquivo and os.path.exists(arquivo):
+                    os.remove(arquivo)
+            except Exception as e:
+                print(f"Erro ao excluir arquivo: {e}")
+            
+            messagebox.showinfo("Sucesso", "Orçamento excluído com sucesso!")
+            self.buscar_orcamentos()
+            
+        except Exception as e:
+            self.conn.rollback()
+            messagebox.showerror("Erro", f"Falha ao excluir orçamento: {e}")
+
+    def fechar_conexao(self):
+        """Método para fechar a conexão com o banco de dados"""
+        if hasattr(self, 'conn'):
+            self.conn.close()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = SistemaOrcamentos(root)
+    
+    # Garantir que a conexão com o banco de dados será fechada ao sair
+    root.protocol("WM_DELETE_WINDOW", lambda: [app.fechar_conexao(), root.destroy()])
+    
+    root.mainloop()
